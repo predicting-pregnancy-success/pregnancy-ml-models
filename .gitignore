@@ -1,1 +1,5 @@
 *.pyc
+*.pkl
+*.npy
+*.json
+*.db
