@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-# 상수
 HIGH_MISSING_COLS = [
     '난자 해동 경과일', 'PGS 시술 여부', 'PGD 시술 여부',
     '착상 전 유전 검사 사용 여부', '임신 시도 또는 마지막 임신 경과 연수',
@@ -14,7 +13,11 @@ MEDIUM_MISSING_COLS = [
 ]
 
 CATEGORICAL_COLS = [
-    '시술 시기 코드', '시술 유형', '특정 시술 유형', '배란 유도 유형',
+    '시술 시기 코드',
+]
+
+TARGET_ENCODE_COLS = [
+    '시술 유형', '특정 시술 유형', '배란 유도 유형',
     '난자 출처', '정자 출처', '배아 생성 주요 이유'
 ]
 
@@ -41,13 +44,11 @@ DONOR_AGE_MAP = {
 
 
 def drop_high_missing(df: pd.DataFrame) -> pd.DataFrame:
-    """결측률 80% 이상 컬럼 제거"""
     cols_to_drop = [c for c in HIGH_MISSING_COLS if c in df.columns]
     return df.drop(columns=cols_to_drop)
 
 
 def encode_count_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """횟수 컬럼 숫자로 변환"""
     for col in COUNT_COLS:
         if col in df.columns:
             df[col] = df[col].map(COUNT_MAP)
@@ -55,15 +56,19 @@ def encode_count_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def encode_donor_age(df: pd.DataFrame) -> pd.DataFrame:
-    """기증자 나이 컬럼 변환"""
     for col in ['난자 기증자 나이', '정자 기증자 나이']:
         if col in df.columns:
             df[col] = df[col].map(DONOR_AGE_MAP)
     return df
 
 
+def add_domain_flags(df: pd.DataFrame) -> pd.DataFrame:
+    if '배아 이식 경과일' in df.columns:
+        df['배반포기_이식'] = (df['배아 이식 경과일'] == 5).astype(int)
+    return df
+
+
 def handle_medium_missing(df: pd.DataFrame, medians: dict = None) -> tuple:
-    """중간 결측 컬럼: 결측 지시 변수 추가 후 중앙값 대체"""
     if medians is None:
         medians = {col: df[col].median() for col in MEDIUM_MISSING_COLS if col in df.columns}
 
@@ -77,7 +82,6 @@ def handle_medium_missing(df: pd.DataFrame, medians: dict = None) -> tuple:
 
 
 def handle_numeric_missing(df: pd.DataFrame, medians: dict = None) -> tuple:
-    """나머지 수치형 컬럼 결측 중앙값 대체"""
     numeric_cols = [
         c for c in df.select_dtypes(include='number').columns
         if c != '임신 성공 여부'
@@ -94,7 +98,6 @@ def handle_numeric_missing(df: pd.DataFrame, medians: dict = None) -> tuple:
 
 
 def encode_categoricals(df: pd.DataFrame, encoders: dict = None) -> tuple:
-    """범주형 컬럼 LabelEncoding"""
     if encoders is None:
         encoders = {}
         for col in CATEGORICAL_COLS:
@@ -117,7 +120,6 @@ def encode_categoricals(df: pd.DataFrame, encoders: dict = None) -> tuple:
 
 def scale_features(df: pd.DataFrame, scaler: StandardScaler = None,
                    exclude_cols: list = None) -> tuple:
-    """수치형 컬럼 표준화 (선형 모델 사용 시)"""
     if exclude_cols is None:
         exclude_cols = ['임신 성공 여부', 'ID']
 
@@ -141,6 +143,7 @@ def preprocess(df: pd.DataFrame, medians: dict = None, encoders: dict = None,
     df = drop_high_missing(df)
     df = encode_count_cols(df)
     df = encode_donor_age(df)
+    df = add_domain_flags(df)
     df, medians = handle_medium_missing(df, medians)
     df, medians = handle_numeric_missing(df, medians)
     df, encoders = encode_categoricals(df, encoders)

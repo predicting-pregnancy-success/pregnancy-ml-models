@@ -17,10 +17,10 @@ def add_ratio_features(df: pd.DataFrame) -> pd.DataFrame:
     def safe_div(a, b):
         return np.where(b == 0, 0, a / b)
 
-    df['배아_이식률'] = safe_div(df['이식된 배아 수'], df['총 생성 배아 수'])
-    df['배아_저장률'] = safe_div(df['저장된 배아 수'], df['총 생성 배아 수'])
-    df['난자_수정률'] = safe_div(df['혼합된 난자 수'], df['수집된 신선 난자 수'])
-    df['미세주입_성공률'] = safe_div(df['미세주입에서 생성된 배아 수'], df['미세주입된 난자 수'])
+    df['배아_이식률']     = safe_div(df['이식된 배아 수'], df['총 생성 배아 수'])
+    df['배아_저장률']     = safe_div(df['저장된 배아 수'], df['총 생성 배아 수'])
+    df['난자_수정률']     = safe_div(df['혼합된 난자 수'], df['수집된 신선 난자 수'])
+    df['미세주입_성공률']  = safe_div(df['미세주입에서 생성된 배아 수'], df['미세주입된 난자 수'])
     df['신선_난자_활용률'] = safe_div(df['혼합된 난자 수'], df['수집된 신선 난자 수'] + df['해동 난자 수'])
 
     return df
@@ -32,8 +32,7 @@ def add_age_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
-    # 연령_그룹이 추가된 이후에 호출되므로 수치형인 연령_그룹 사용
-    df['연령_x_시술횟수'] = df['연령_그룹'] * df['총 시술 횟수']
+    df['연령_x_시술횟수']  = df['연령_그룹'] * df['총 시술 횟수']
     df['연령_x_이식배아수'] = df['연령_그룹'] * df['이식된 배아 수']
     df['연령_x_생성배아수'] = df['연령_그룹'] * df['총 생성 배아 수']
 

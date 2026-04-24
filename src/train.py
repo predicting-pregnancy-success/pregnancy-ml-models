@@ -5,13 +5,14 @@ import pandas as pd
 import joblib
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, average_precision_score
+from category_encoders import TargetEncoder
 import lightgbm as lgb
 import optuna
 from optuna.samplers import TPESampler
 
 import sys
 sys.path.append('..')
-from src.preprocess import preprocess
+from src.preprocess import preprocess, TARGET_ENCODE_COLS
 from src.features import add_features
 
 
@@ -20,7 +21,7 @@ RANDOM_SEED = 42
 MODEL_DIR   = '../saved_models'
 DATA_PATH   = '../data/raw/'
 
-DEFAULT_PARAMS = {
+DEFAULT_PARAMS_LGBM = {
     'objective':             'binary',
     'metric':                'auc',
     'learning_rate':         0.05,
@@ -32,6 +33,31 @@ DEFAULT_PARAMS = {
     'early_stopping_rounds': 50,
     'verbose':               -1,
     'random_state':          RANDOM_SEED,
+}
+
+DEFAULT_PARAMS_XGB = {
+    'objective':             'binary:logistic',
+    'eval_metric':           'auc',
+    'learning_rate':         0.05,
+    'max_depth':             6,
+    'min_child_weight':      5,
+    'subsample':             0.8,
+    'colsample_bytree':      0.8,
+    'n_estimators':          1000,
+    'early_stopping_rounds': 50,
+    'verbosity':             0,
+    'random_state':          RANDOM_SEED,
+}
+
+DEFAULT_PARAMS_CAT = {
+    'loss_function':         'Logloss',
+    'eval_metric':           'AUC',
+    'learning_rate':         0.05,
+    'depth':                 6,
+    'n_estimators':          1000,
+    'early_stopping_rounds': 50,
+    'verbose':               0,
+    'random_seed':           RANDOM_SEED,
 }
 
 DROP_COLS = ['ID', '시술 당시 나이', '임신 성공 여부']
@@ -60,17 +86,27 @@ def prepare(train, test, use_features=True):
 
 def run_experiment(
     name,
-    use_features = True,
-    class_weight = None,
-    params       = None,
+    use_features        = True,
+    class_weight        = None,
+    params              = None,
+    model_type          = 'lgbm',
+    use_target_encoding = False,
 ):
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     if params is None:
-        params = DEFAULT_PARAMS.copy()
+        if model_type == 'lgbm':
+            params = DEFAULT_PARAMS_LGBM.copy()
+        elif model_type == 'xgb':
+            params = DEFAULT_PARAMS_XGB.copy()
+        elif model_type == 'catboost':
+            params = DEFAULT_PARAMS_CAT.copy()
 
     if class_weight == 'balanced':
-        params['is_unbalance'] = True
+        if model_type == 'lgbm':
+            params['is_unbalance'] = True
+        elif model_type == 'catboost':
+            params['auto_class_weights'] = 'Balanced'
 
     train_raw, test_raw = load_data()
     X, y, X_test = prepare(train_raw, test_raw, use_features=use_features)
@@ -82,15 +118,40 @@ def run_experiment(
     fold_roc_aucs = []
     fold_pr_aucs  = []
 
-    for fold, (tr_idx, val_idx) in enumerate(skf.split(X, y), start=1):
-        X_tr,  X_val = X.iloc[tr_idx],  X.iloc[val_idx]
-        y_tr,  y_val = y.iloc[tr_idx],  y.iloc[val_idx]
+    te_cols = [c for c in TARGET_ENCODE_COLS if c in X.columns]
 
-        model = lgb.LGBMClassifier(**params)
-        model.fit(
-            X_tr, y_tr,
-            eval_set=[(X_val, y_val)],
-        )
+    for fold, (tr_idx, val_idx) in enumerate(skf.split(X, y), start=1):
+        X_tr,  X_val  = X.iloc[tr_idx].copy(),  X.iloc[val_idx].copy()
+        y_tr,  y_val  = y.iloc[tr_idx],          y.iloc[val_idx]
+        X_test_fold   = X_test.copy()
+
+        if use_target_encoding and te_cols:
+            te = TargetEncoder(cols=te_cols)
+            X_tr        = te.fit_transform(X_tr, y_tr)
+            X_val       = te.transform(X_val)
+            X_test_fold = te.transform(X_test_fold)
+        else:
+            X_test_fold = X_test.copy()
+
+        clean_params = {k: v for k, v in params.items() if k != 'model_type'}
+
+        if model_type == 'lgbm':
+            model = lgb.LGBMClassifier(**clean_params)
+            model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)])
+
+        elif model_type == 'xgb':
+            import xgboost as xgb
+            fit_params = {'verbose': False}
+            if class_weight == 'balanced':
+                from sklearn.utils.class_weight import compute_sample_weight
+                fit_params['sample_weight'] = compute_sample_weight('balanced', y_tr)
+            model = xgb.XGBClassifier(**clean_params)
+            model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], **fit_params)
+
+        elif model_type == 'catboost':
+            from catboost import CatBoostClassifier
+            model = CatBoostClassifier(**clean_params)
+            model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
 
         val_pred     = model.predict_proba(X_val)[:, 1]
         oof[val_idx] = val_pred
@@ -100,7 +161,7 @@ def run_experiment(
         fold_roc_aucs.append(fold_roc)
         fold_pr_aucs.append(fold_pr)
 
-        test_preds += model.predict_proba(X_test)[:, 1] / N_SPLITS
+        test_preds += model.predict_proba(X_test_fold)[:, 1] / N_SPLITS
 
         joblib.dump(model, f'{MODEL_DIR}/{name}_fold{fold}.pkl')
 
@@ -115,13 +176,15 @@ def run_experiment(
     np.save(f'{MODEL_DIR}/{name}_test.npy', test_preds)
 
     result = {
-        'name':         name,
-        'use_features': use_features,
-        'class_weight': class_weight,
-        'cv_roc_auc':   [round(v, 4) for v in fold_roc_aucs],
-        'mean_roc_auc': round(mean_roc, 4),
-        'cv_pr_auc':    [round(v, 4) for v in fold_pr_aucs],
-        'mean_pr_auc':  round(mean_pr, 4),
+        'name':                name,
+        'model_type':          model_type,
+        'use_features':        use_features,
+        'use_target_encoding': use_target_encoding,
+        'class_weight':        class_weight,
+        'cv_roc_auc':          [round(v, 4) for v in fold_roc_aucs],
+        'mean_roc_auc':        round(mean_roc, 4),
+        'cv_pr_auc':           [round(v, 4) for v in fold_pr_aucs],
+        'mean_pr_auc':         round(mean_pr, 4),
     }
 
     with open(f'{MODEL_DIR}/{name}_result.json', 'w', encoding='utf-8') as f:
@@ -131,10 +194,11 @@ def run_experiment(
 
 
 def tune_experiment(
-    name         = 'tuned',
-    use_features = True,
-    n_trials     = 50,
-    model_type   = 'lgbm',
+    name                = 'tuned',
+    use_features        = True,
+    n_trials            = 50,
+    model_type          = 'lgbm',
+    use_target_encoding = False,
 ):
     os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -142,6 +206,7 @@ def tune_experiment(
     X, y, _ = prepare(train_raw, test_raw, use_features=use_features)
 
     skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_SEED)
+    te_cols = [c for c in TARGET_ENCODE_COLS if c in X.columns]
 
     def objective(trial):
         if model_type == 'lgbm':
@@ -165,18 +230,18 @@ def tune_experiment(
         elif model_type == 'xgb':
             import xgboost as xgb
             params = {
-                'objective':         'binary:logistic',
-                'eval_metric':       'auc',
-                'verbosity':         0,
-                'random_state':      RANDOM_SEED,
-                'learning_rate':     trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
-                'max_depth':         trial.suggest_int('max_depth', 3, 10),
-                'min_child_weight':  trial.suggest_int('min_child_weight', 1, 20),
-                'subsample':         trial.suggest_float('subsample', 0.5, 1.0),
-                'colsample_bytree':  trial.suggest_float('colsample_bytree', 0.5, 1.0),
-                'reg_alpha':         trial.suggest_float('reg_alpha', 1e-4, 10.0, log=True),
-                'reg_lambda':        trial.suggest_float('reg_lambda', 1e-4, 10.0, log=True),
-                'n_estimators':      1000,
+                'objective':             'binary:logistic',
+                'eval_metric':           'auc',
+                'verbosity':             0,
+                'random_state':          RANDOM_SEED,
+                'learning_rate':         trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+                'max_depth':             trial.suggest_int('max_depth', 3, 10),
+                'min_child_weight':      trial.suggest_int('min_child_weight', 1, 20),
+                'subsample':             trial.suggest_float('subsample', 0.5, 1.0),
+                'colsample_bytree':      trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                'reg_alpha':             trial.suggest_float('reg_alpha', 1e-4, 10.0, log=True),
+                'reg_lambda':            trial.suggest_float('reg_lambda', 1e-4, 10.0, log=True),
+                'n_estimators':          1000,
                 'early_stopping_rounds': 50,
             }
             model = xgb.XGBClassifier(**params)
@@ -184,30 +249,35 @@ def tune_experiment(
         elif model_type == 'catboost':
             from catboost import CatBoostClassifier
             params = {
-                'loss_function':     'Logloss',
-                'eval_metric':       'AUC',
-                'verbose':           0,
-                'random_seed':       RANDOM_SEED,
-                'learning_rate':     trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
-                'depth':             trial.suggest_int('depth', 4, 10),
-                'min_data_in_leaf':  trial.suggest_int('min_data_in_leaf', 20, 200),
-                'subsample':         trial.suggest_float('subsample', 0.5, 1.0),
-                'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.5, 1.0),
-                'reg_lambda':        trial.suggest_float('reg_lambda', 1e-4, 10.0, log=True),
-                'n_estimators':      1000,
+                'loss_function':         'Logloss',
+                'eval_metric':           'AUC',
+                'verbose':               0,
+                'random_seed':           RANDOM_SEED,
+                'learning_rate':         trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+                'depth':                 trial.suggest_int('depth', 4, 10),
+                'min_data_in_leaf':      trial.suggest_int('min_data_in_leaf', 20, 200),
+                'subsample':             trial.suggest_float('subsample', 0.5, 1.0),
+                'colsample_bylevel':     trial.suggest_float('colsample_bylevel', 0.5, 1.0),
+                'reg_lambda':            trial.suggest_float('reg_lambda', 1e-4, 10.0, log=True),
+                'n_estimators':          1000,
                 'early_stopping_rounds': 50,
             }
             model = CatBoostClassifier(**params)
 
         fold_scores = []
         for tr_idx, val_idx in skf.split(X, y):
-            X_tr,  X_val = X.iloc[tr_idx],  X.iloc[val_idx]
-            y_tr,  y_val = y.iloc[tr_idx],  y.iloc[val_idx]
+            X_tr,  X_val = X.iloc[tr_idx].copy(), X.iloc[val_idx].copy()
+            y_tr,  y_val = y.iloc[tr_idx],         y.iloc[val_idx]
 
-            model.fit(
-                X_tr, y_tr,
-                eval_set=[(X_val, y_val)],
-            )
+            if use_target_encoding and te_cols:
+                te = TargetEncoder(cols=te_cols)
+                X_tr  = te.fit_transform(X_tr, y_tr)
+                X_val = te.transform(X_val)
+
+            if model_type == 'xgb':
+                model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+            else:
+                model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)])
 
             val_pred = model.predict_proba(X_val)[:, 1]
             fold_scores.append(roc_auc_score(y_val, val_pred))
@@ -226,8 +296,8 @@ def tune_experiment(
 
     best_params = study.best_params
     best_params.update({
-        'model_type':  model_type,
-        'n_estimators': 1000,
+        'model_type':            model_type,
+        'n_estimators':          1000,
         'early_stopping_rounds': 50,
     })
 

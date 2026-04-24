@@ -3,3 +3,5 @@
 *.npy
 *.json
 *.db
+*.tsv
+*.tfevents
