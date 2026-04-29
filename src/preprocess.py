@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
 
 HIGH_MISSING_COLS = [
     '난자 해동 경과일', 'PGS 시술 여부', 'PGD 시술 여부',
@@ -14,6 +16,8 @@ MEDIUM_MISSING_COLS = [
 
 CATEGORICAL_COLS = [
     '시술 시기 코드',
+    '시술 유형', '특정 시술 유형', '배란 유도 유형',
+    '난자 출처', '정자 출처', '배아 생성 주요 이유'
 ]
 
 TARGET_ENCODE_COLS = [
@@ -42,10 +46,39 @@ DONOR_AGE_MAP = {
     '만41-45세': 5
 }
 
+# DI 시술 시 의미없는 배아/난자 관련 컬럼 → 0으로
+DI_ZERO_COLS = [
+    '총 생성 배아 수', '이식된 배아 수', '저장된 배아 수',
+    '미세주입된 난자 수', '미세주입에서 생성된 배아 수',
+    '미세주입 배아 이식 수', '미세주입 후 저장된 배아 수',
+    '해동된 배아 수', '해동 난자 수', '수집된 신선 난자 수',
+    '저장된 신선 난자 수', '혼합된 난자 수',
+    '파트너 정자와 혼합된 난자 수', '기증자 정자와 혼합된 난자 수',
+]
+
+# MICE로 채울 컬럼 (배아/난자 수치, 서로 강하게 연관)
+MICE_COLS = [
+    '총 생성 배아 수', '이식된 배아 수', '저장된 배아 수',
+    '미세주입된 난자 수', '미세주입에서 생성된 배아 수',
+    '미세주입 배아 이식 수', '미세주입 후 저장된 배아 수',
+    '해동된 배아 수', '해동 난자 수', '수집된 신선 난자 수',
+    '저장된 신선 난자 수', '혼합된 난자 수',
+    '파트너 정자와 혼합된 난자 수', '기증자 정자와 혼합된 난자 수',
+]
+
 
 def drop_high_missing(df: pd.DataFrame) -> pd.DataFrame:
     cols_to_drop = [c for c in HIGH_MISSING_COLS if c in df.columns]
     return df.drop(columns=cols_to_drop)
+
+
+def fill_di_zeros(df: pd.DataFrame) -> pd.DataFrame:
+    """DI 시술인 경우 배아/난자 관련 컬럼 결측치를 0으로"""
+    di_mask = df['시술 유형'] == 'DI'
+    for col in DI_ZERO_COLS:
+        if col in df.columns:
+            df.loc[di_mask, col] = df.loc[di_mask, col].fillna(0)
+    return df
 
 
 def encode_count_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -118,6 +151,19 @@ def encode_categoricals(df: pd.DataFrame, encoders: dict = None) -> tuple:
     return df, encoders
 
 
+def apply_mice(train: pd.DataFrame, test: pd.DataFrame) -> tuple:
+    mice_cols = [c for c in MICE_COLS if c in train.columns]
+
+    imputer = IterativeImputer(random_state=42, max_iter=3)
+    train_imputed = imputer.fit_transform(train[mice_cols])
+    test_imputed  = imputer.transform(test[mice_cols])
+
+    train[mice_cols] = train_imputed
+    test[mice_cols]  = test_imputed
+
+    return train, test
+
+
 def scale_features(df: pd.DataFrame, scaler: StandardScaler = None,
                    exclude_cols: list = None) -> tuple:
     if exclude_cols is None:
@@ -137,18 +183,58 @@ def scale_features(df: pd.DataFrame, scaler: StandardScaler = None,
     return df, scaler
 
 
-def preprocess(df: pd.DataFrame, medians: dict = None, encoders: dict = None,
-               scaler: StandardScaler = None, scale: bool = False) -> pd.DataFrame:
-    df = df.copy()
-    df = drop_high_missing(df)
-    df = encode_count_cols(df)
-    df = encode_donor_age(df)
-    df = add_domain_flags(df)
-    df, medians = handle_medium_missing(df, medians)
-    df, medians = handle_numeric_missing(df, medians)
-    df, encoders = encode_categoricals(df, encoders)
+def preprocess(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    medians: dict = None,
+    encoders: dict = None,
+    scaler: StandardScaler = None,
+    scale: bool = False,
+) -> tuple:
+    """
+    train, test 동시에 받아서 처리.
+    MICE를 train 기준으로 학습 후 test에 적용하기 위해 두 개를 같이 받음.
+    """
+    train = train.copy()
+    test  = test.copy()
+
+    # 1. 고결측 컬럼 제거
+    train = drop_high_missing(train)
+    test  = drop_high_missing(test)
+
+    # 2. DI 시술 결측치 0으로
+    train = fill_di_zeros(train)
+    test  = fill_di_zeros(test)
+
+    # 3. MICE로 배아/난자 결측치 처리
+    train, test = apply_mice(train, test)
+
+    # 4. 횟수 컬럼 변환
+    train = encode_count_cols(train)
+    test  = encode_count_cols(test)
+
+    # 5. 기증자 나이 변환
+    train = encode_donor_age(train)
+    test  = encode_donor_age(test)
+
+    # 6. 도메인 플래그 추가
+    train = add_domain_flags(train)
+    test  = add_domain_flags(test)
+
+    # 7. 중간 결측 처리 (median + 결측 지시 변수)
+    train, medians = handle_medium_missing(train)
+    test,  _       = handle_medium_missing(test, medians)
+
+    # 8. 나머지 수치형 결측 처리
+    train, medians = handle_numeric_missing(train)
+    test,  _       = handle_numeric_missing(test, medians)
+
+    # 9. 범주형 인코딩
+    train, encoders = encode_categoricals(train)
+    test,  _        = encode_categoricals(test, encoders)
 
     if scale:
-        df, scaler = scale_features(df, scaler)
+        train, scaler = scale_features(train, scaler)
+        test,  _      = scale_features(test, scaler)
 
-    return df
+    return train, test
