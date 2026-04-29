@@ -385,6 +385,23 @@ OOF 예측값을 메타 피처로 사용하는 이유:
 
 ---
 
+#### ROC-AUC 곡선
+
+![트리 모델 ROC-AUC 곡선](images/roc_auc_tree.png)
+
+LightGBM, XGBoost, CatBoost 세 트리 모델은 모두 AUC 0.740~0.741 수준으로 유사한 판별력을 보였습니다. 세 모델이 거의 동일한 곡선을 그리는 만큼 단일 트리 모델만으로는 성능 한계가 있음을 확인할 수 있습니다.
+
+![딥러닝 모델 ROC-AUC 곡선](images/roc_auc_dl.png)
+
+FT-Transformer(0.7393)와 SAINT(0.7386)는 트리 모델 대비 소폭 낮은 AUC를 기록했습니다. 그러나 Feature Importance에서 확인했듯 트리 모델과 서로 다른 피처를 중요하게 학습하므로, 앙상블 시 상호 보완적인 역할을 합니다.
+
+![최종 모델 ROC-AUC 곡선](images/roc_auc_final.png)
+
+5개 베이스 모델의 OOF 예측값을 메타 피처로 로지스틱 회귀 스태킹을 적용한 결과, AUC 0.7409로 개별 모델 대비 성능이 향상되었습니다. 트리와 딥러닝이 서로 다른 패턴을 학습한 덕분에 스태킹이 효과적으로 작동한 결과입니다.
+
+
+---
+
 #### 트리 모델 Feature Importance
 
 ![트리 모델 Feature Importance](images/feature_importance_tree.png)
