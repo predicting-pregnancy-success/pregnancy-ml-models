@@ -269,11 +269,6 @@ IVF(체외수정) 및 DI(인공수정) 시술 데이터로 임신 성공 여부(
 - FT-Transformer는 피처 순서와 무관하게 어떤 피처 조합이든 관계를 직접 학습 가능
 - 태뷸러 데이터에서 트리 계열에 필적하는 성능으로 검증된 아키텍처 (Revisiting Deep Learning Models for Tabular Data, NeurIPS 2021)
 
-**SAINT를 선택한 이유**
-- FT-Transformer의 column attention(피처 간)에 더해 intersample attention(샘플 간)을 추가
-- 비슷한 시술 조건의 케이스끼리 비교하며 학습 → 난임처럼 케이스 간 유사 패턴이 존재하는 도메인에서 유리
-- 예: 연령대, 시술 유형, 배아 수가 비슷한 케이스들을 attention으로 참조하여 예측 정확도 향상
-
 ---
 
 **2. 클래스 불균형 대응**
@@ -304,11 +299,11 @@ OOF 예측값을 메타 피처로 사용하는 이유:
 **트리 모델 튜닝**
 - Optuna TPE Sampler로 50 trial 하이퍼파라미터 탐색
 - 탐색 범위: learning_rate, num_leaves, min_child_samples, subsample, colsample_bytree, reg_alpha, reg_lambda
-- 3개 시드(42, 123, 456)로 학습 후 평균 → 분산 감소
+- seed42 단일 학습
 
 **딥러닝 모델**
-- FT-Transformer: rtdl 라이브러리 활용, 수치형/범주형 피처 분리 처리
-- SAINT: column attention + intersample attention 직접 구현, batch_size=256으로 메모리 최적화
+- FT-Transformer: rtdl 라이브러리 활용, 수치형/범주형 피처 분리 처리, seed42 단일
+- SAINT: column attention + intersample attention 직접 구현, batch_size=256으로 메모리 최적화, seed42 단일
 
 **스태킹**
 - 5개 모델 OOF를 메타 피처로 → 10-Fold 로지스틱 회귀로 최적 가중치 자동 학습
@@ -370,3 +365,58 @@ OOF 예측값을 메타 피처로 사용하는 이유:
 **하이퍼파라미터 탐색 범위**
 - n_estimators, learning_rate, max_depth, num_leaves, subsample, colsample_bytree
 - `scale_pos_weight=ratio`로 클래스 불균형 대응
+
+---
+
+## 📈 모델 결과
+
+### 김창현 — 베이스 모델 성능 및 Feature Importance 분석
+
+#### 베이스 모델 성능
+
+| 모델 | CV ROC-AUC |
+|------|-----------|
+| LightGBM | 0.7402 |
+| XGBoost | 0.7404 |
+| CatBoost | 0.7402 |
+| FT-Transformer | 0.7398 |
+| SAINT | 0.7390 |
+| **스태킹 (최종)** | **0.7420** |
+
+---
+
+#### 트리 모델 Feature Importance
+
+![트리 모델 Feature Importance](images/feature_importance_tree.png)
+
+**LightGBM**에서는 `이식된_배아_수`가 압도적으로 높은 importance를 기록했습니다 (293,099). 그 뒤를 `배아_이식_경과일_결측`, `배아_이식_경과일`, `저장된_배아_수` 순으로 이었습니다. 도메인 지식에서 확인했던 배아 이식 시기와 배아 수의 중요성이 데이터에서도 그대로 드러납니다.
+
+**XGBoost**는 `배반포기_이식` (66.9)을 가장 중요한 피처로 꼽았습니다. 5일차 이식 여부를 나타내는 도메인 플래그가 단독으로 가장 높은 gain을 기록한 것으로, 배반포기 이식의 의학적 우위가 모델에서도 핵심 분기 기준이 됨을 확인할 수 있습니다. `연령_그룹` (57.0)이 그 다음으로 높아 연령 역시 강력한 예측 변수임을 보여줍니다.
+
+**CatBoost**는 `이식된_배아_수` (48.1)와 `배아_이식_경과일_결측` (9.8)을 주요 피처로 선정했습니다. 세 트리 모델 모두 배아 이식 관련 변수와 연령 관련 파생 변수를 일관되게 높게 평가했습니다.
+
+---
+
+#### 딥러닝 모델 Feature Importance
+
+![딥러닝 모델 Proxy Feature Importance](images/feature_importance_dl.png)
+
+**FT-Transformer**와 **SAINT** 모두 `배반포기_이식` (각각 0.5, 0.6)을 가장 중요한 피처로 꼽았습니다. 트리 모델에서 XGBoost만이 `배반포기_이식`을 1위로 선정했던 것과 달리, 딥러닝 모델은 두 모델 모두 이 피처를 압도적 1위로 평가했습니다.
+
+`연령_그룹` (0.4), `연령_x_시술횟수` (0.2) 등 연령 관련 파생 변수도 상위권을 차지했습니다. 반면 트리 모델에서 높은 중요도를 보인 `이식된_배아_수` 같은 수치형 변수는 딥러닝에서 상대적으로 낮게 평가되었습니다.
+
+이는 FT-Transformer와 SAINT가 피처 간 상호작용(배반포기 이식 × 연령)을 attention 메커니즘으로 포착하면서, 단순 수치보다 도메인 지식 기반의 플래그 변수를 더 강한 신호로 학습했음을 시사합니다.
+
+---
+
+#### 트리 vs 딥러닝 — Feature Importance 비교
+
+| 피처 | LightGBM | XGBoost | CatBoost | FTT | SAINT |
+|------|---------|---------|---------|-----|-------|
+| 이식된_배아_수 | 🥇 1위 | — | 🥇 1위 | — | — |
+| 배반포기_이식 | 13위 | 🥇 1위 | — | 🥇 1위 | 🥇 1위 |
+| 연령_그룹 | 7위 | 2위 | 3위 | 2위 | 2위 |
+| 배아_이식_경과일 | 3위 | — | — | — | — |
+| 미세주입_성공률 | — | — | — | 4위 | 4위 |
+
+트리 모델과 딥러닝 모델이 서로 다른 피처를 중요하게 평가하는 경향이 뚜렷합니다. 트리는 연속형 수치(`이식된_배아_수`, `배아_이식_경과일`)에 강하게 반응한 반면, 딥러닝은 도메인 플래그(`배반포기_이식`)와 상호작용 피처(`연령_x_시술횟수`)를 더 중요하게 학습했습니다. 이 차이가 이종 앙상블의 성능 향상을 설명하는 핵심 근거입니다.
